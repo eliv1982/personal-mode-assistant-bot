@@ -11,11 +11,13 @@ _HEADING = re.compile(r"^#{1,6}\s+", re.MULTILINE)
 # Bold: **text** or __text__
 _BOLD = re.compile(r"\*\*(.+?)\*\*|__(.+?)__", re.DOTALL)
 
-# Italic: *text* or _text_  — but only when NOT a bullet list marker
-# A bullet list line looks like "* item" or "- item" at the start of the line;
-# we want to keep those intact, so we only strip *…* when it wraps actual content.
-_ITALIC_STAR = re.compile(r"(?<!\*)\*(?!\*|\s)(.+?)(?<!\s)\*(?!\*)")
-_ITALIC_UNDER = re.compile(r"(?<!_)_(?!_|\s)(.+?)(?<!\s)_(?!_)")
+# Italic: *text* or _text_  — but only when NOT a bullet list marker and NOT
+# flanked by word characters. The word-boundary guard (?<!\w) / (?!\w) is what
+# keeps identifiers like `my_var_name` / `path_to_file_v2` and expressions like
+# `2*3*4` intact: their delimiters sit directly against letters/digits, so they
+# never qualify as emphasis markers, unlike "*word*" or "_word_" in prose.
+_ITALIC_STAR = re.compile(r"(?<!\w)(?<!\*)\*(?!\*|\s)(.+?)(?<!\s)\*(?!\*)(?!\w)")
+_ITALIC_UNDER = re.compile(r"(?<!\w)(?<!_)_(?!_|\s)(.+?)(?<!\s)_(?!_)(?!\w)")
 
 # Inline code: `text`
 _INLINE_CODE = re.compile(r"`([^`\n]+)`")
@@ -55,3 +57,38 @@ def sanitize_ai_text(text: str) -> str:
     text = _EXCESS_BLANKS.sub("\n\n", text)
 
     return text.strip()
+
+
+def split_into_chunks(text: str, limit: int) -> list[str]:
+    """Split `text` into chunks of at most `limit` characters each.
+
+    Joining the returned chunks in order reproduces `text` exactly (no
+    characters are dropped, added, or reordered). Prefers to break on a
+    newline or space near the limit so words aren't split mid-token when
+    avoidable; falls back to a hard cut when no such boundary exists.
+    """
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+    if not text:
+        return []
+    if len(text) <= limit:
+        return [text]
+
+    chunks: list[str] = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(start + limit, n)
+        if end == n:
+            split_at = end
+        else:
+            split_at = text.rfind("\n", start, end)
+            if split_at <= start:
+                split_at = text.rfind(" ", start, end)
+            if split_at <= start:
+                split_at = end
+            else:
+                split_at += 1  # keep the boundary character in this chunk
+        chunks.append(text[start:split_at])
+        start = split_at
+    return chunks

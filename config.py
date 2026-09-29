@@ -34,6 +34,51 @@ def _int_env(key: str, default: int) -> int:
         raise EnvironmentError(f"Environment variable '{key}' must be an integer, got: {raw!r}")
 
 
+def _validate_memory_limit(value: int) -> int:
+    """MEMORY_LIMIT = maximum number of individual messages retained per chat.
+
+    Must be an even number >= 2, so retained history always starts with a
+    user message and never begins with an orphan assistant reply.
+    """
+    if value < 2:
+        raise EnvironmentError(
+            f"MEMORY_LIMIT must be at least 2 (got {value}). "
+            "It is the number of individual messages retained per chat, not pairs."
+        )
+    if value % 2 != 0:
+        raise EnvironmentError(
+            f"MEMORY_LIMIT must be an even number (got {value}), "
+            "so retained history cannot start with an orphan assistant message."
+        )
+    return value
+
+
+def _parse_allowed_chat_ids(key: str = "ALLOWED_CHAT_IDS") -> frozenset[int] | None:
+    """Parse a comma-separated allowlist of Telegram chat ids.
+
+    Returns None when unset/blank, meaning unrestricted access (current
+    default behavior). Any non-integer entry fails configuration loading
+    clearly rather than being silently ignored.
+    """
+    raw = os.getenv(key)
+    if raw is None or not raw.strip():
+        return None
+
+    ids: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            ids.add(int(part))
+        except ValueError:
+            raise EnvironmentError(
+                f"Environment variable '{key}' contains an invalid chat id: {part!r}. "
+                "Expected a comma-separated list of integers."
+            )
+    return frozenset(ids) if ids else None
+
+
 @dataclass(frozen=True)
 class Config:
     telegram_bot_token: str
@@ -43,6 +88,7 @@ class Config:
     output_price_per_1m: float
     memory_limit: int
     usd_rub_fallback: float
+    allowed_chat_ids: frozenset[int] | None = field(default=None)
     data_dir: str = field(default="data")
     memory_file: str = field(default="data/memory.json")
     usage_file: str = field(default="data/usage.json")
@@ -56,6 +102,7 @@ def load_config() -> Config:
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         input_price_per_1m=_float_env("OPENAI_INPUT_PRICE_PER_1M", 0.15),
         output_price_per_1m=_float_env("OPENAI_OUTPUT_PRICE_PER_1M", 0.60),
-        memory_limit=_int_env("MEMORY_LIMIT", 20),
+        memory_limit=_validate_memory_limit(_int_env("MEMORY_LIMIT", 20)),
         usd_rub_fallback=_float_env("USD_RUB_FALLBACK", 100.0),
+        allowed_chat_ids=_parse_allowed_chat_ids(),
     )

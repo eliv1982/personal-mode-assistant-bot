@@ -26,6 +26,9 @@ data/*.json
 # Logs
 logs/*.log
 
+# Tests
+.pytest_cache/
+
 # IDE
 .vscode/
 .idea/

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 import logging
-import os
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
+
+from json_store import atomic_write_json, load_json_with_quarantine
 
 logger = logging.getLogger(__name__)
 
@@ -15,29 +15,11 @@ def _new_request_id() -> str:
 
 
 def _load_all(path: str) -> list[dict[str, Any]]:
-    if not os.path.exists(path):
-        return []
-    try:
-        with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
-        if not isinstance(data, list):
-            raise ValueError("Usage file root must be a JSON array.")
-        return data
-    except Exception as exc:
-        logger.error(
-            "Failed to read usage file '%s' (%s: %s). Starting with empty usage log.",
-            path, type(exc).__name__, exc,
-        )
-        return []
+    return load_json_with_quarantine(path, list, [])
 
 
 def _save_all(path: str, records: list[dict[str, Any]]) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    try:
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(records, fh, ensure_ascii=False, indent=2)
-    except Exception as exc:
-        logger.error("Failed to write usage file '%s': %s", path, exc)
+    atomic_write_json(path, records)
 
 
 def save_usage(
@@ -77,9 +59,15 @@ def save_usage(
     return request_id
 
 
-def get_usage_record(path: str, request_id: str) -> dict[str, Any] | None:
+def get_usage_record(path: str, request_id: str, chat_id: int | str) -> dict[str, Any] | None:
+    """Return the usage record for `request_id`, scoped to `chat_id`.
+
+    A record is returned only if it also belongs to `chat_id`, so a
+    guessed/leaked request id from another chat cannot be used to read
+    someone else's usage details.
+    """
     for record in _load_all(path):
-        if record.get("id") == request_id:
+        if record.get("id") == request_id and record.get("chat_id") == str(chat_id):
             return record
     return None
 

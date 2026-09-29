@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import json
 import logging
-import os
 from typing import Any
+
+from json_store import atomic_write_json, load_json_with_quarantine
 
 logger = logging.getLogger(__name__)
 
@@ -15,26 +15,11 @@ def _empty_record(mode: str = _DEFAULT_MODE) -> dict[str, Any]:
 
 
 def _load_all(path: str) -> dict[str, Any]:
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
-        if not isinstance(data, dict):
-            raise ValueError("Memory file root must be a JSON object.")
-        return data
-    except Exception as exc:
-        logger.error("Failed to read memory file '%s' (%s: %s). Starting with empty memory.", path, type(exc).__name__, exc)
-        return {}
+    return load_json_with_quarantine(path, dict, {})
 
 
 def _save_all(path: str, data: dict[str, Any]) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    try:
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, ensure_ascii=False, indent=2)
-    except Exception as exc:
-        logger.error("Failed to write memory file '%s' (%s: %s).", path, type(exc).__name__, exc)
+    atomic_write_json(path, data)
 
 
 def get_mode(path: str, chat_id: int | str, default_mode: str = _DEFAULT_MODE) -> str:
@@ -69,7 +54,7 @@ def append_messages(
     messages: list[dict[str, str]] = record.get("messages", [])
     messages.append({"role": "user", "content": user_text})
     messages.append({"role": "assistant", "content": assistant_text})
-    # Keep only the last `limit` messages (pairs count toward the limit individually)
+    # `limit` counts individual messages, not user/assistant pairs.
     record["messages"] = messages[-limit:]
     data[key] = record
     _save_all(path, data)

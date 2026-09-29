@@ -18,6 +18,8 @@ import usage_tracker
 from cbr_client import get_usd_rub_rate
 from config import load_config
 from cost_tracker import calculate_cost
+from delivery import send_llm_reply
+from json_store import JsonWriteError
 from keyboards import parse_mode_callback, parse_usage_callback
 from openai_client import OpenAIClient, OpenAIUserError
 from prompt_manager import PromptManager
@@ -80,6 +82,8 @@ _HELP_TEXT = (
     "Статистика расходов сохраняется отдельно и сбрасывается через /resetstats.</i>"
 )
 
+_ACCESS_DENIED_TEXT = "⛔ Доступ к этому боту ограничен для данного чата."
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -139,6 +143,106 @@ def _format_stats(stats: dict, usd_rub: float, rate_date: str, is_fallback: bool
         f"<i>Курс ЦБ РФ на {rate_date}: 1 USD = {usd_rub:.2f} ₽{fallback_note}</i>\n"
         f"<i>Стоимость примерная. Цены берутся из .env.</i>"
     )
+
+
+# ── Text-message orchestration (extracted for handler-level testing) ──────────
+
+async def process_text_message(
+    message: Message,
+    pm: PromptManager,
+    oai: OpenAIClient,
+    cfg,
+    log: logging.Logger,
+) -> None:
+    chat_id = message.chat.id
+    user_text = message.text or ""
+
+    if cfg.allowed_chat_ids is not None and chat_id not in cfg.allowed_chat_ids:
+        log.warning("Rejected LLM request from unauthorized chat_id=%s", chat_id)
+        await message.answer(_ACCESS_DENIED_TEXT)
+        return
+
+    mode_key = memory.get_mode(cfg.memory_file, chat_id, pm.default_mode)
+    system_prompt = pm.get_system_prompt(mode_key)
+    history = memory.get_messages(cfg.memory_file, chat_id)
+
+    thinking_msg = await message.answer("⏳ Думаю…")
+
+    try:
+        try:
+            llm_response = await oai.chat(
+                system_prompt=system_prompt,
+                history=history,
+                user_message=user_text,
+            )
+        except OpenAIUserError as exc:
+            await message.answer(str(exc))
+            return
+
+        # OpenAI completed the request and returned usage data, so the cost
+        # was incurred regardless of whether usage persistence or Telegram
+        # delivery below succeed. Compute it now, independent of both.
+        usd_rub, is_fallback, rate_date = await get_usd_rub_rate(cfg.usd_rub_fallback)
+        report = calculate_cost(
+            input_tokens=llm_response.input_tokens,
+            output_tokens=llm_response.output_tokens,
+            total_tokens=llm_response.total_tokens,
+            input_price_per_1m=cfg.input_price_per_1m,
+            output_price_per_1m=cfg.output_price_per_1m,
+            usd_rub_rate=usd_rub,
+            rate_date=rate_date,
+            rate_is_fallback=is_fallback,
+        )
+
+        # Usage persistence is auxiliary analytics -- the OpenAI cost is
+        # already incurred, so a write failure here must not discard the
+        # already-generated answer. On failure we still deliver the answer,
+        # just without a details button, since there is no valid persisted
+        # request record for it to look up.
+        try:
+            request_id = usage_tracker.save_usage(
+                path=cfg.usage_file,
+                chat_id=chat_id,
+                mode=mode_key,
+                model=cfg.openai_model,
+                input_tokens=report.input_tokens,
+                output_tokens=report.output_tokens,
+                total_tokens=report.total_tokens,
+                total_usd=report.total_usd,
+                usd_rub_rate=report.usd_rub_rate,
+                rate_date=report.rate_date,
+                total_rub=report.total_rub,
+                is_fallback_rate=report.rate_is_fallback,
+            )
+            kb = keyboards.usage_keyboard(request_id)
+        except JsonWriteError:
+            log.error(
+                "Failed to persist usage record for chat_id=%s; delivering answer without details button.",
+                chat_id, exc_info=True,
+            )
+            kb = None
+
+        clean_text = sanitize_ai_text(llm_response.text)
+
+        # Deliver as plain text (parse_mode=None), chunked/fallback-safe.
+        # Only record the exchange as delivered conversation history once
+        # Telegram has actually accepted it.
+        delivered = await send_llm_reply(message.answer, clean_text, reply_markup=kb)
+        if delivered:
+            memory.append_messages(
+                path=cfg.memory_file,
+                chat_id=chat_id,
+                user_text=user_text,
+                assistant_text=llm_response.text,
+                limit=cfg.memory_limit,
+            )
+    finally:
+        try:
+            await thinking_msg.delete()
+        except Exception:
+            log.warning(
+                "Failed to delete 'thinking' placeholder for chat_id=%s", chat_id, exc_info=True,
+            )
 
 
 # ── Handlers ──────────────────────────────────────────────────────────────────
@@ -251,81 +355,24 @@ def register_handlers(
             await callback.answer("Неверный идентификатор запроса.", show_alert=True)
             return
 
-        record = usage_tracker.get_usage_record(cfg.usage_file, request_id)
+        if callback.message is None:
+            await callback.answer("Не удалось определить чат для запроса.", show_alert=True)
+            return
+
+        chat_id = callback.message.chat.id
+        record = usage_tracker.get_usage_record(cfg.usage_file, request_id, chat_id=chat_id)
         if record is None:
             await callback.answer("Данные запроса не найдены.", show_alert=True)
             return
 
         text = _format_usage_detail(record, pm)
-        await callback.message.answer(text)  # type: ignore[union-attr]
+        await callback.message.answer(text)
         await callback.answer()
 
     # plain text → LLM
     @dp.message(F.text)
     async def handle_text(message: Message) -> None:
-        chat_id = message.chat.id
-        user_text = message.text or ""
-
-        mode_key = memory.get_mode(cfg.memory_file, chat_id, pm.default_mode)
-        system_prompt = pm.get_system_prompt(mode_key)
-        history = memory.get_messages(cfg.memory_file, chat_id)
-
-        thinking_msg = await message.answer("⏳ Думаю…")
-
-        try:
-            llm_response = await oai.chat(
-                system_prompt=system_prompt,
-                history=history,
-                user_message=user_text,
-            )
-        except OpenAIUserError as exc:
-            await thinking_msg.delete()
-            await message.answer(str(exc))
-            return
-
-        # Persist exchange to memory
-        memory.append_messages(
-            path=cfg.memory_file,
-            chat_id=chat_id,
-            user_text=user_text,
-            assistant_text=llm_response.text,
-            limit=cfg.memory_limit,
-        )
-
-        # Fetch rate and compute cost
-        usd_rub, is_fallback, rate_date = await get_usd_rub_rate(cfg.usd_rub_fallback)
-        report = calculate_cost(
-            input_tokens=llm_response.input_tokens,
-            output_tokens=llm_response.output_tokens,
-            total_tokens=llm_response.total_tokens,
-            input_price_per_1m=cfg.input_price_per_1m,
-            output_price_per_1m=cfg.output_price_per_1m,
-            usd_rub_rate=usd_rub,
-            rate_date=rate_date,
-            rate_is_fallback=is_fallback,
-        )
-
-        # Persist usage record
-        request_id = usage_tracker.save_usage(
-            path=cfg.usage_file,
-            chat_id=chat_id,
-            mode=mode_key,
-            model=cfg.openai_model,
-            input_tokens=report.input_tokens,
-            output_tokens=report.output_tokens,
-            total_tokens=report.total_tokens,
-            total_usd=report.total_usd,
-            usd_rub_rate=report.usd_rub_rate,
-            rate_date=report.rate_date,
-            total_rub=report.total_rub,
-            is_fallback_rate=report.rate_is_fallback,
-        )
-
-        kb = keyboards.usage_keyboard(request_id)
-        clean_text = sanitize_ai_text(llm_response.text)
-
-        await thinking_msg.delete()
-        await message.answer(clean_text, reply_markup=kb)
+        await process_text_message(message, pm, oai, cfg, log)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
