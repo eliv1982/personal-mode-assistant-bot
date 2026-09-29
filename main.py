@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import logging.handlers
 import os
 import sys
 from datetime import datetime, timezone
@@ -27,12 +28,24 @@ from text_utils import sanitize_ai_text
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
+# Bounded log file size for a single-process personal bot: 1 MB per file,
+# 3 backups kept (bot.log.1 .. bot.log.3) -- a few MB of history is plenty
+# and keeps the logs directory from growing unbounded.
+_LOG_MAX_BYTES = 1_000_000
+_LOG_BACKUP_COUNT = 3
+
+
 def _setup_logging() -> None:
     os.makedirs("logs", exist_ok=True)
     fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     handlers: list[logging.Handler] = [
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("logs/bot.log", encoding="utf-8"),
+        logging.handlers.RotatingFileHandler(
+            "logs/bot.log",
+            maxBytes=_LOG_MAX_BYTES,
+            backupCount=_LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        ),
     ]
     logging.basicConfig(level=logging.INFO, format=fmt, handlers=handlers)
     for noisy in ("httpx", "httpcore", "openai._base_client"):

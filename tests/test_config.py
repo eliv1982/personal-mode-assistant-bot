@@ -15,6 +15,13 @@ def base_env(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.delenv("MEMORY_LIMIT", raising=False)
     monkeypatch.delenv("ALLOWED_CHAT_IDS", raising=False)
+    # Isolate the remaining optional fields from whatever a developer's local
+    # .env happens to contain, so tests asserting on default values are not
+    # accidentally coupled to machine-specific configuration.
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_INPUT_PRICE_PER_1M", raising=False)
+    monkeypatch.delenv("OPENAI_OUTPUT_PRICE_PER_1M", raising=False)
+    monkeypatch.delenv("USD_RUB_FALLBACK", raising=False)
     return monkeypatch
 
 
@@ -91,5 +98,50 @@ class TestRequiredFields:
     def test_missing_telegram_token_raises(self, monkeypatch):
         monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        with pytest.raises(EnvironmentError):
+            load_config()
+
+
+class TestSmallConfigValidation:
+    def test_valid_defaults_load(self, base_env):
+        cfg = load_config()
+        assert cfg.openai_model == "gpt-4o-mini"
+        assert cfg.input_price_per_1m == 0.15
+        assert cfg.output_price_per_1m == 0.60
+        assert cfg.usd_rub_fallback == 100.0
+
+    def test_empty_openai_model_rejected(self, base_env):
+        base_env.setenv("OPENAI_MODEL", "")
+        with pytest.raises(EnvironmentError):
+            load_config()
+
+    def test_whitespace_only_openai_model_rejected(self, base_env):
+        base_env.setenv("OPENAI_MODEL", "   ")
+        with pytest.raises(EnvironmentError):
+            load_config()
+
+    def test_negative_input_price_rejected(self, base_env):
+        base_env.setenv("OPENAI_INPUT_PRICE_PER_1M", "-0.01")
+        with pytest.raises(EnvironmentError):
+            load_config()
+
+    def test_negative_output_price_rejected(self, base_env):
+        base_env.setenv("OPENAI_OUTPUT_PRICE_PER_1M", "-1")
+        with pytest.raises(EnvironmentError):
+            load_config()
+
+    def test_zero_price_is_accepted(self, base_env):
+        # Free/self-hosted models are a legitimate zero-cost configuration.
+        base_env.setenv("OPENAI_INPUT_PRICE_PER_1M", "0")
+        cfg = load_config()
+        assert cfg.input_price_per_1m == 0.0
+
+    def test_zero_fallback_rate_rejected(self, base_env):
+        base_env.setenv("USD_RUB_FALLBACK", "0")
+        with pytest.raises(EnvironmentError):
+            load_config()
+
+    def test_negative_fallback_rate_rejected(self, base_env):
+        base_env.setenv("USD_RUB_FALLBACK", "-50")
         with pytest.raises(EnvironmentError):
             load_config()

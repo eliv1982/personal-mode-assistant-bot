@@ -23,8 +23,9 @@ ENV/
 # Data (memory storage — keep directory, ignore content)
 data/*.json
 
-# Logs
+# Logs (including rotated backups, e.g. bot.log.1, bot.log.2, ...)
 logs/*.log
+logs/*.log.*
 
 # Tests
 .pytest_cache/

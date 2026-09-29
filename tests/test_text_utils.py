@@ -27,10 +27,28 @@ class TestSanitizeAiTextPreservesCode:
         text = "Результат: 2*3*4 = 24."
         assert sanitize_ai_text(text) == text
 
+    def test_single_exponent_survives(self):
+        assert sanitize_ai_text("2**3") == "2**3"
+
+    def test_chained_exponent_survives(self):
+        # Regression: the `**` bold rule used to greedily match the first
+        # `**...**` span it found, corrupting `2**3**4` into `234`.
+        assert sanitize_ai_text("2**3**4") == "2**3**4"
+
+    def test_variable_exponent_survives(self):
+        assert sanitize_ai_text("value**2") == "value**2"
+
+    def test_chained_exponent_in_sentence_survives(self):
+        text = "Результат: 2**3**4 = 4096."
+        assert sanitize_ai_text(text) == text
+
 
 class TestSanitizeAiTextCleansMarkdown:
     def test_bold_markers_stripped(self):
         assert sanitize_ai_text("**important**") == "important"
+
+    def test_bold_word_in_prose_stripped(self):
+        assert sanitize_ai_text("Это **важно** для дела.") == "Это важно для дела."
 
     def test_heading_markers_stripped(self):
         assert sanitize_ai_text("## Заголовок") == "Заголовок"

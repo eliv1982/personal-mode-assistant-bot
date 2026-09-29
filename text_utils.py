@@ -8,8 +8,15 @@ _CODE_FENCE = re.compile(r"^```[^\n]*$", re.MULTILINE)
 # Markdown headings: ### text, ## text, # text at line start
 _HEADING = re.compile(r"^#{1,6}\s+", re.MULTILINE)
 
-# Bold: **text** or __text__
-_BOLD = re.compile(r"\*\*(.+?)\*\*|__(.+?)__", re.DOTALL)
+# Bold: **text** or __text__ — guarded the same way as the italic patterns
+# below (?<!\w) / (?!\w) so that exponentiation chains like `2**3**4` are not
+# misread as `2` + bold("3") + `4`: real Markdown bold markers are never
+# glued directly to a preceding/following word character, but exponent `**`
+# operators always are.
+_BOLD = re.compile(
+    r"(?<!\w)\*\*(?!\*|\s)(.+?)(?<!\s)\*\*(?!\w)|(?<!\w)__(?!_|\s)(.+?)(?<!\s)__(?!\w)",
+    re.DOTALL,
+)
 
 # Italic: *text* or _text_  — but only when NOT a bullet list marker and NOT
 # flanked by word characters. The word-boundary guard (?<!\w) / (?!\w) is what

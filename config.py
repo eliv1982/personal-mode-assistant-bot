@@ -34,6 +34,28 @@ def _int_env(key: str, default: int) -> int:
         raise EnvironmentError(f"Environment variable '{key}' must be an integer, got: {raw!r}")
 
 
+def _non_empty_str_env(key: str, default: str) -> str:
+    raw = os.getenv(key)
+    if raw is None:
+        return default
+    value = raw.strip()
+    if not value:
+        raise EnvironmentError(f"Environment variable '{key}' must not be empty.")
+    return value
+
+
+def _require_non_negative(key: str, value: float) -> float:
+    if value < 0:
+        raise EnvironmentError(f"Environment variable '{key}' must not be negative (got {value}).")
+    return value
+
+
+def _require_positive(key: str, value: float) -> float:
+    if value <= 0:
+        raise EnvironmentError(f"Environment variable '{key}' must be a positive number (got {value}).")
+    return value
+
+
 def _validate_memory_limit(value: int) -> int:
     """MEMORY_LIMIT = maximum number of individual messages retained per chat.
 
@@ -99,10 +121,14 @@ def load_config() -> Config:
     return Config(
         telegram_bot_token=_require("TELEGRAM_BOT_TOKEN"),
         openai_api_key=_require("OPENAI_API_KEY"),
-        openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-        input_price_per_1m=_float_env("OPENAI_INPUT_PRICE_PER_1M", 0.15),
-        output_price_per_1m=_float_env("OPENAI_OUTPUT_PRICE_PER_1M", 0.60),
+        openai_model=_non_empty_str_env("OPENAI_MODEL", "gpt-4o-mini"),
+        input_price_per_1m=_require_non_negative(
+            "OPENAI_INPUT_PRICE_PER_1M", _float_env("OPENAI_INPUT_PRICE_PER_1M", 0.15)
+        ),
+        output_price_per_1m=_require_non_negative(
+            "OPENAI_OUTPUT_PRICE_PER_1M", _float_env("OPENAI_OUTPUT_PRICE_PER_1M", 0.60)
+        ),
         memory_limit=_validate_memory_limit(_int_env("MEMORY_LIMIT", 20)),
-        usd_rub_fallback=_float_env("USD_RUB_FALLBACK", 100.0),
+        usd_rub_fallback=_require_positive("USD_RUB_FALLBACK", _float_env("USD_RUB_FALLBACK", 100.0)),
         allowed_chat_ids=_parse_allowed_chat_ids(),
     )
